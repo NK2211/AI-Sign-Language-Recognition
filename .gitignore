@@ -1,0 +1,8 @@
+﻿dataset/
+raw_zips/
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+*.crdownload
