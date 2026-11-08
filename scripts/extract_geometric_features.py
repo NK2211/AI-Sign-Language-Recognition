@@ -1,353 +1,109 @@
 import os
 import numpy as np
 
-
-# ============================================================
-# PATHS
-# ============================================================
-
 INPUT_DIR = r"D:\AI-Sign-Language-Recognition\keypoints"
-
 OUTPUT_DIR = r"D:\AI-Sign-Language-Recognition\geometric_features"
+EXPECTED_CLASSES = 61
 
-os.makedirs(
-    OUTPUT_DIR,
-    exist_ok=True
-)
-
-
-# ============================================================
-# LANDMARK INDICES
-# ============================================================
-
-LEFT_SHOULDER = 0
-RIGHT_SHOULDER = 1
-
-LEFT_ELBOW = 2
-RIGHT_ELBOW = 3
-
-LEFT_WRIST = 4
-RIGHT_WRIST = 5
-
-LEFT_HAND_START = 6
-LEFT_HAND_END = 27
-
-RIGHT_HAND_START = 27
-RIGHT_HAND_END = 48
-
-
-# ============================================================
-# DISTANCE
-# ============================================================
+os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 def distance(a, b):
-
     return np.linalg.norm(a - b)
 
-
-# ============================================================
-# ANGLE
-# ============================================================
-
 def angle(a, b, c):
-
-    # Angle ABC
-
-    ba = a - b
-    bc = c - b
-
-    denominator = (
-        np.linalg.norm(ba)
-        * np.linalg.norm(bc)
-    )
-
+    ba, bc = a - b, c - b
+    denominator = np.linalg.norm(ba) * np.linalg.norm(bc)
     if denominator < 1e-8:
         return 0.0
-
     cosine = np.dot(ba, bc) / denominator
-
-    cosine = np.clip(
-        cosine,
-        -1.0,
-        1.0
-    )
-
-    return np.arccos(cosine)
-
-
-# ============================================================
-# GEOMETRIC FEATURES FOR ONE FRAME
-# ============================================================
+    return np.arccos(np.clip(cosine, -1.0, 1.0))
 
 def extract_features(frame):
+    ls, rs, le, re, lw, rw = frame[:6]
+    features = [
+        distance(ls, rs), distance(ls, le), distance(le, lw),
+        distance(ls, lw), distance(rs, re), distance(re, rw),
+        distance(rs, rw), distance(lw, rw),
+        angle(ls, le, lw), angle(rs, re, rw),
+        distance(lw, rs), distance(rw, ls)
+    ]
 
-    features = []
+    for i in range(6, 27):
+        features.append(distance(lw, frame[i]))
+    for i in range(27, 48):
+        features.append(distance(rw, frame[i]))
 
-    # --------------------------------------------------------
-    # BASIC BODY DISTANCES
-    # --------------------------------------------------------
+    features.extend((lw - ls).tolist())
+    features.extend((rw - rs).tolist())
 
-    ls = frame[LEFT_SHOULDER]
-    rs = frame[RIGHT_SHOULDER]
-
-    le = frame[LEFT_ELBOW]
-    re = frame[RIGHT_ELBOW]
-
-    lw = frame[LEFT_WRIST]
-    rw = frame[RIGHT_WRIST]
-
-
-    # Shoulder distance
-    features.append(
-        distance(ls, rs)
-    )
-
-    # Left arm
-    features.append(
-        distance(ls, le)
-    )
-
-    features.append(
-        distance(le, lw)
-    )
-
-    features.append(
-        distance(ls, lw)
-    )
-
-    # Right arm
-    features.append(
-        distance(rs, re)
-    )
-
-    features.append(
-        distance(re, rw)
-    )
-
-    features.append(
-        distance(rs, rw)
-    )
-
-    # Between hands
-    features.append(
-        distance(lw, rw)
-    )
+    result = np.asarray(features, dtype=np.float32)
+    if result.shape != (60,):
+        raise ValueError(f"Expected 60 features, got {result.shape}")
+    return result
 
 
-    # --------------------------------------------------------
-    # BODY ANGLES
-    # --------------------------------------------------------
-
-    # Left elbow angle
-    features.append(
-        angle(ls, le, lw)
-    )
-
-    # Right elbow angle
-    features.append(
-        angle(rs, re, rw)
-    )
-
-
-    # --------------------------------------------------------
-    # HAND → BODY DISTANCES
-    # --------------------------------------------------------
-
-    features.append(
-        distance(lw, rs)
-    )
-
-    features.append(
-        distance(rw, ls)
-    )
-
-
-    # --------------------------------------------------------
-    # HAND LANDMARK DISTANCES
-    # --------------------------------------------------------
-
-    # Wrist to each landmark in the same hand
-
-    for i in range(
-        LEFT_HAND_START,
-        LEFT_HAND_END
-    ):
-
-        features.append(
-            distance(lw, frame[i])
+def discover_classes():
+    classes = []
+    for name in sorted(os.listdir(INPUT_DIR), key=str.casefold):
+        folder = os.path.join(INPUT_DIR, name)
+        if os.path.isdir(folder) and any(
+            f.lower().endswith(".npz") for f in os.listdir(folder)
+        ):
+            classes.append(name)
+    if len(classes) != EXPECTED_CLASSES:
+        raise RuntimeError(
+            f"Expected {EXPECTED_CLASSES} keypoint folders, found {len(classes)}"
         )
+    return classes
 
 
-    for i in range(
-        RIGHT_HAND_START,
-        RIGHT_HAND_END
-    ):
+def main():
+    classes = discover_classes()
+    processed = failed = 0
 
-        features.append(
-            distance(rw, frame[i])
-        )
+    for ci, label in enumerate(classes, 1):
+        src_dir = os.path.join(INPUT_DIR, label)
+        dst_dir = os.path.join(OUTPUT_DIR, label)
+        os.makedirs(dst_dir, exist_ok=True)
 
+        files = sorted(f for f in os.listdir(src_dir) if f.lower().endswith(".npz"))
+        print(f"\n[{ci}/{len(classes)}] {label}: {len(files)} files")
 
-    # --------------------------------------------------------
-    # RELATIVE HAND POSITIONS
-    # --------------------------------------------------------
+        for filename in files:
+            src = os.path.join(src_dir, filename)
+            dst = os.path.join(dst_dir, filename)
+            try:
+                with np.load(src, allow_pickle=True) as data:
+                    landmarks = data["landmarks"].astype(np.float32)
+                    stored_label = str(data["label"].item())
 
-    # Left hand relative to left shoulder
-    relative_left = lw - ls
+                if stored_label != label:
+                    raise ValueError(f"Label mismatch: {stored_label}")
+                if landmarks.shape != (32, 48, 3):
+                    raise ValueError(f"Unexpected shape: {landmarks.shape}")
+                if not np.isfinite(landmarks).all():
+                    raise ValueError("Non-finite landmark values")
 
-    features.extend(
-        relative_left.tolist()
-    )
+                geometric = np.asarray(
+                    [extract_features(frame) for frame in landmarks],
+                    dtype=np.float32
+                )
+                if geometric.shape != (32, 60):
+                    raise ValueError(f"Unexpected feature shape: {geometric.shape}")
 
-    # Right hand relative to right shoulder
-    relative_right = rw - rs
+                np.savez_compressed(
+                    dst, geometric_features=geometric, label=label
+                )
+                processed += 1
+            except Exception as exc:
+                failed += 1
+                print(f"FAILED {label}/{filename}: {exc}")
 
-    features.extend(
-        relative_right.tolist()
-    )
-
-
-    return np.array(
-        features,
-        dtype=np.float32
-    )
-
-
-# ============================================================
-# PROCESS ONE FILE
-# ============================================================
-
-def process_file(input_file, output_file):
-
-    data = np.load(
-        input_file,
-        allow_pickle=True
-    )
-
-    landmarks = data["landmarks"]
-
-    label = data["label"]
-
-    geometric_sequence = []
-
-    for frame in landmarks:
-
-        features = extract_features(
-            frame
-        )
-
-        geometric_sequence.append(
-            features
-        )
-
-    geometric_sequence = np.array(
-        geometric_sequence,
-        dtype=np.float32
-    )
-
-    np.savez_compressed(
-        output_file,
-        geometric_features=geometric_sequence,
-        label=label
-    )
+    print("\nGEOMETRIC EXTRACTION FINISHED")
+    print("Processed:", processed, "| Failed:", failed)
+    if failed:
+        print("Fix failed files before creating the split.")
 
 
-# ============================================================
-# PROCESS DATASET
-# ============================================================
-
-classes = sorted([
-    folder
-    for folder in os.listdir(INPUT_DIR)
-    if os.path.isdir(
-        os.path.join(INPUT_DIR, folder)
-    )
-])
-
-
-print("=" * 60)
-print("GEOMETRIC FEATURE EXTRACTION")
-print("=" * 60)
-
-print(
-    f"Classes found: {len(classes)}"
-)
-
-print(
-    f"Input: {INPUT_DIR}"
-)
-
-print(
-    f"Output: {OUTPUT_DIR}"
-)
-
-print()
-
-
-total = 0
-
-
-for class_index, class_name in enumerate(classes):
-
-    input_class_dir = os.path.join(
-        INPUT_DIR,
-        class_name
-    )
-
-    output_class_dir = os.path.join(
-        OUTPUT_DIR,
-        class_name
-    )
-
-    os.makedirs(
-        output_class_dir,
-        exist_ok=True
-    )
-
-
-    files = sorted([
-        f
-        for f in os.listdir(input_class_dir)
-        if f.endswith(".npz")
-    ])
-
-
-    print(
-        f"[{class_index + 1}/{len(classes)}] "
-        f"{class_name}: {len(files)} files"
-    )
-
-
-    for file in files:
-
-        input_file = os.path.join(
-            input_class_dir,
-            file
-        )
-
-        output_file = os.path.join(
-            output_class_dir,
-            file
-        )
-
-
-        process_file(
-            input_file,
-            output_file
-        )
-
-        total += 1
-
-
-print()
-print("=" * 60)
-print("GEOMETRIC EXTRACTION COMPLETE")
-print("=" * 60)
-
-print(
-    f"Files processed: {total}"
-)
-
-print(
-    f"Output: {OUTPUT_DIR}"
-)
+if __name__ == "__main__":
+    main()
